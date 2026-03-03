@@ -36,6 +36,8 @@ const { buildMutation, isHighRiskMutationAllowed } = require('./gep/mutation');
 const { selectPersonalityForRun } = require('./gep/personality');
 const { clip, writePromptArtifact, renderSessionsSpawnCall } = require('./gep/bridge');
 const { getEvolutionDir } = require('./gep/paths');
+const { shouldReflect, buildReflectionContext, recordReflection } = require('./gep/reflection');
+const { loadNarrativeSummary } = require('./gep/narrativeMemory');
 
 const REPO_ROOT = getRepoRoot();
 
@@ -1189,6 +1191,31 @@ async function run() {
     console.error(`[MemoryGraph] Read failed: ${e.message}`);
     console.error(`[MemoryGraph] Refusing to evolve without causal memory. Target: ${memoryGraphPath()}`);
     throw new Error(`MemoryGraph Read failed: ${e.message}`);
+  }
+
+  // Reflection Phase: periodically pause to assess evolution strategy.
+  try {
+    const cycleState = fs.existsSync(STATE_FILE) ? JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) : {};
+    const cycleCount = cycleState.cycleCount || 0;
+    if (shouldReflect({ cycleCount, recentEvents })) {
+      const narrativeSummary = loadNarrativeSummary(3000);
+      const reflectionCtx = buildReflectionContext({
+        recentEvents,
+        signals,
+        memoryAdvice,
+        narrative: narrativeSummary,
+      });
+      recordReflection({
+        cycle_count: cycleCount,
+        signals_snapshot: signals.slice(0, 20),
+        preferred_gene: memoryAdvice && memoryAdvice.preferredGeneId ? memoryAdvice.preferredGeneId : null,
+        banned_genes: memoryAdvice && Array.isArray(memoryAdvice.bannedGeneIds) ? memoryAdvice.bannedGeneIds : [],
+        context_preview: reflectionCtx.slice(0, 1000),
+      });
+      console.log(`[Reflection] Strategic reflection recorded at cycle ${cycleCount}.`);
+    }
+  } catch (e) {
+    console.log('[Reflection] Failed (non-fatal): ' + (e && e.message ? e.message : e));
   }
 
   var recentFailedCapsules = [];

@@ -18,6 +18,8 @@ const { computeAssetId, SCHEMA_VERSION } = require('./contentHash');
 const { captureEnvFingerprint } = require('./envFingerprint');
 const { buildValidationReport } = require('./validationReport');
 const { logAssetCall } = require('./assetCallLog');
+const { recordNarrative } = require('./narrativeMemory');
+const { isLlmReviewEnabled, runLlmReview } = require('./llmReview');
 
 function nowIso() {
   return new Date().toISOString();
@@ -1083,6 +1085,29 @@ function solidify({ intent, summary, dryRun = false, rollbackOnFailure = true } 
     console.error(`[Solidify] CANARY FAILED: ${canary.err}`);
   }
 
+  // Optional LLM review: when EVOLVER_LLM_REVIEW=true, submit diff for review.
+  let llmReviewResult = null;
+  if (constraintCheck.ok && validation.ok && protocolViolations.length === 0 && isLlmReviewEnabled()) {
+    try {
+      const reviewDiff = captureDiffSnapshot(repoRoot);
+      llmReviewResult = runLlmReview({
+        diff: reviewDiff,
+        gene: geneUsed,
+        signals,
+        mutation,
+      });
+      if (llmReviewResult && llmReviewResult.approved === false) {
+        constraintCheck.violations.push('llm_review_rejected: ' + (llmReviewResult.summary || 'no reason'));
+        constraintCheck.ok = false;
+        console.log('[LLMReview] Change REJECTED: ' + (llmReviewResult.summary || ''));
+      } else if (llmReviewResult) {
+        console.log('[LLMReview] Change approved (confidence: ' + (llmReviewResult.confidence || '?') + ')');
+      }
+    } catch (e) {
+      console.log('[LLMReview] Failed (non-fatal): ' + (e && e.message ? e.message : e));
+    }
+  }
+
   // Build standardized ValidationReport (machine-readable, interoperable).
   const validationReport = buildValidationReport({
     geneId: geneUsed && geneUsed.id ? geneUsed.id : null,
@@ -1288,6 +1313,21 @@ function solidify({ intent, summary, dryRun = false, rollbackOnFailure = true } 
     run_id: runId, at: ts, event_id: event.id, capsule_id: capsuleId, outcome: event.outcome,
   };
   if (!dryRun) writeStateForSolidify(state);
+
+  if (!dryRun) {
+    try {
+      recordNarrative({
+        gene: geneUsed,
+        signals,
+        mutation,
+        outcome: event.outcome,
+        blast,
+        capsule,
+      });
+    } catch (e) {
+      console.log('[Narrative] Record failed (non-fatal): ' + (e && e.message ? e.message : e));
+    }
+  }
 
   // Search-First Evolution: auto-publish eligible capsules to the Hub (as Gene+Capsule bundle).
   let publishResult = null;
